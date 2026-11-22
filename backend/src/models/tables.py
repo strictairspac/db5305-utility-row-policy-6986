@@ -1,6 +1,6 @@
 from sqlalchemy import (JSON, Column, ForeignKey, Index, Integer, MetaData,
                         String, Table, Text)
-from sqlalchemy import text as sa_text
+from sqlalchemy import text
 
 schema = MetaData()
 users = Table('accounts', schema,
@@ -81,9 +81,9 @@ def _backfill_input_digests(conn):
     import hashlib
     import json
 
-    seen = {row[0] for row in conn.execute(sa_text(
+    seen = {row[0] for row in conn.execute(text(
         'SELECT input_digest FROM business_cases WHERE input_digest IS NOT NULL'))}
-    rows = conn.execute(sa_text(
+    rows = conn.execute(text(
         'SELECT id, payload FROM business_cases WHERE input_digest IS NULL ORDER BY id')).mappings().all()
     for row in rows:
         payload = row['payload']
@@ -101,6 +101,6 @@ def _backfill_input_digests(conn):
         if digest in seen:
             continue
         seen.add(digest)
-        conn.execute(sa_text(
+        conn.execute(text(
             'UPDATE business_cases SET input_digest = :digest WHERE id = :id AND input_digest IS NULL'),
             {'digest': digest, 'id': row['id']})
