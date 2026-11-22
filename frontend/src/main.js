@@ -10,6 +10,7 @@ import {bindEvidence, evidencePage} from './pages/evidence.js';
 import {go, route} from './router/hash.js';
 import {submit} from './hooks/submit.js';
 import {esc} from './utils/dom.js';
+import {takeNotice} from './stores/notice.js';
 
 const app = document.getElementById('app');
 document.title = topic.name;
@@ -49,14 +50,17 @@ async function refresh() {
   }
   const navigation = Object.keys(pages).map((x,index)=>x==='editor'&&state.session.role!=='operator' ? ''
     : `<a href="#${x}" ${x===page?'aria-current="page"':''}>${esc(topic.modules[index])}</a>`).join('');
+  const flash = takeNotice();
+  const banner = flash ? `<p class="notice" role="status">${esc(flash)}</p>` : '';
   app.innerHTML=`<header class="masthead"><a class="identity" href="#cases">${esc(topic.name)}</a><div class="user"><span>${esc(roleLabels[state.session.role])}</span><button id="logout" class="secondary">退出</button></div></header>
-    <div class="workspace"><nav aria-label="业务模块">${navigation}</nav><main><div id="message" role="alert"></div>${pages[page](state,id)}</main></div>`;
+    <div class="workspace"><nav aria-label="业务模块">${navigation}</nav><main><div id="message" role="alert"></div>${banner}${pages[page](state,id)}</main></div>`;
   document.getElementById('logout').addEventListener('click',()=>{setSession(null); void refresh();});
   if (page==='editor') bindEditor(state, api, fail);
   if (page==='evidence') bindEvidence(api, refresh, fail);
   if (page==='runs') {
     document.getElementById('refresh').addEventListener('click', refresh);
-    if (state.runs.some(row=>['queued','running'].includes(row.status))) timer=setTimeout(refresh,1000);
+    const selected = state.runs.find(row=>row.id===id) || state.runs[0];
+    if (selected && ['queued','running'].includes(selected.status)) timer=setTimeout(refresh,1000);
   }
 }
 window.addEventListener('hashchange', refresh);

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from src.config.settings import cache, engine
-from src.controllers.workflow import download
+from src.controllers.workflow import download, export_csv
 from src.models.tables import audit, cases, evidence, runs
 from src.schemas.workflow import CaseForm, LoginForm, ReviewForm
 from src.services import domain, workflow
@@ -57,6 +57,11 @@ def list_evidence(_=Depends(current_user)):
 @router.get('/evidence/{identity}/download')
 def export_evidence(identity: int, _=Depends(current_user)):
     return download(identity)
+
+
+@router.get('/evidence/{identity}/export')
+def export_result(identity: int, _=Depends(current_user)):
+    return export_csv(identity)
 
 
 @router.post('/evidence/{identity}/review')

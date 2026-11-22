@@ -25,14 +25,15 @@ def work():
             if not job:
                 cache.brpop('worker:wake', timeout=1)
                 continue
-            run_id, token, payload = job
+            run_id, token, payload, title = job
             stop = Event()
             thread = Thread(target=heartbeat, args=(stop,), daemon=True)
             thread.start()
             try:
-                result = solve(payload, engine)
+                result = solve(payload, engine, batch_name=title)
                 finish(run_id, token, result=result)
             except (ValueError, KeyError, TypeError) as exc:
+                # A failed attempt keeps any prior good evidence for the batch.
                 finish(run_id, token, error=str(exc)[:500])
             except Exception:
                 logging.exception('Domain run failed: %s', run_id)

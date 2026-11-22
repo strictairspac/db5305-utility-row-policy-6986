@@ -7,12 +7,16 @@ from src.constants.workflow import Role
 from src.models.tables import audit, cases, evidence, runs, schema, users
 from src.services.domain import SPEC
 from src.services.security import hash_password
+from src.services.workflow import input_digest
 from src.utils.time import utc_time
 
 
 def keep_existing(conn, table, key, values):
     if IS_MYSQL:
         statement = mysql_insert(table).values(**values).on_duplicate_key_update(id=table.c.id)
+    elif table is cases:
+        # Cases also carry a unique input digest, so skip on any conflict.
+        statement = postgres_insert(table).values(**values).on_conflict_do_nothing()
     else:
         statement = postgres_insert(table).values(**values).on_conflict_do_nothing(index_elements=[key])
     conn.execute(statement)
@@ -24,11 +28,14 @@ def seed():
             keep_existing(conn, users, 'username', {'username': role.value, 'role': role.value,
                 'password_hash': hash_password('Demo-Walkthrough-2026')})
         keep_existing(conn, cases, 'slug', {'slug': 'demo', 'title': SPEC['name'],
-            'payload': SPEC['sample'], 'author': 'demo', 'created_at': utc_time()})
+            'payload': SPEC['sample'], 'input_digest': input_digest(SPEC['sample']),
+            'author': 'demo', 'created_at': utc_time()})
         return {table.name: conn.execute(select(func.count()).select_from(table)).scalar_one()
                 for table in (users, cases, runs, evidence, audit)}
 
 
 if __name__ == '__main__':
     schema.create_all(engine)
+    from src.models.tables import upgrade
+    upgrade(engine)
     print(seed())

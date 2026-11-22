@@ -3,6 +3,7 @@ import uuid
 
 from fastapi import HTTPException
 from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import IntegrityError
 
 from src.config.settings import cache, engine
 from src.constants.workflow import Status
@@ -28,6 +29,15 @@ def found(conn, table, identity):
     return dict(row)
 
 
+def input_digest(payload):
+    """Identity of a batch: the normalized business input, never the title."""
+    try:
+        identity = domain.batch_identity(payload)
+    except ValueError:
+        identity = payload
+    return hashlib.sha256(canonical(identity)).hexdigest()
+
+
 def make_case(title, payload, actor):
     title = title.strip()
     if not title:
@@ -39,16 +49,54 @@ def make_case(title, payload, actor):
             domain.validate(payload)
     except (ValueError, TypeError) as exc:
         raise HTTPException(422, str(exc)) from None
+    digest = input_digest(payload)
     with engine.begin() as conn:
-        case_id = conn.execute(cases.insert().values(slug=uuid.uuid4().hex, title=title, payload=payload,
-                               author=actor, created_at=utc_time())).inserted_primary_key[0]
+        existing = conn.execute(select(cases).where(cases.c.input_digest == digest)).mappings().first()
+        if existing is not None:
+            # The same batch input is a single batch; reruns reuse it.
+            return {**dict(existing), 'reused': True}
+        try:
+            with conn.begin_nested():
+                case_id = conn.execute(cases.insert().values(
+                    slug=uuid.uuid4().hex, title=title, payload=payload, input_digest=digest,
+                    author=actor, created_at=utc_time())).inserted_primary_key[0]
+        except IntegrityError:
+            # A concurrent submit of the same input won the insert race; the
+            # savepoint above keeps this transaction usable for the lookup.
+            existing = conn.execute(select(cases).where(cases.c.input_digest == digest)).mappings().first()
+            if existing is None:
+                raise
+            return {**dict(existing), 'reused': True}
         log(conn, actor, 'create_case', case_id)
-        return found(conn, cases, case_id)
+        return {**found(conn, cases, case_id), 'reused': False}
+
+
+def _reusable_run(conn, case_id):
+    """A run whose result can be reused: an active attempt, else the newest complete one."""
+    with_result = select(runs.c.id).where(evidence.c.run_id == runs.c.id).exists()
+    active = conn.execute(select(runs).where(
+        runs.c.case_id == case_id, runs.c.status.in_([Status.QUEUED, Status.RUNNING]))
+        .order_by(runs.c.id.desc()).limit(1)).mappings().first()
+    if active is not None:
+        return active, 'active'
+    complete = conn.execute(select(runs).where(
+        runs.c.case_id == case_id, runs.c.status == Status.COMPLETE, with_result)
+        .order_by(runs.c.id.desc()).limit(1)).mappings().first()
+    if complete is not None:
+        return complete, 'complete'
+    return None, None
 
 
 def enqueue(case_id, actor):
     with engine.begin() as conn:
+        # Lock the batch row so two concurrent reruns cannot both enqueue.
+        conn.execute(select(cases.c.id).where(cases.c.id == case_id).with_for_update()).first()
         found(conn, cases, case_id)
+        existing, reason = _reusable_run(conn, case_id)
+        if existing is not None:
+            # Rerunning the same batch reuses its original result instead of
+            # creating a new batch or a duplicate run.
+            return {**dict(existing), 'reused': True, 'reuse_reason': reason}
         run_id = conn.execute(runs.insert().values(case_id=case_id, status=Status.QUEUED,
                               owner=actor, created_at=utc_time())).inserted_primary_key[0]
         log(conn, actor, 'enqueue', run_id)
@@ -59,7 +107,7 @@ def enqueue(case_id, actor):
     except Exception:
         # The durable database queue is polled even if Redis is temporarily unavailable.
         pass
-    return result
+    return {**result, 'reused': False}
 
 
 def claim():
@@ -73,7 +121,8 @@ def claim():
         token = str(uuid.uuid4())
         conn.execute(runs.update().where(runs.c.id == run.id).values(
             started_at=utc_time(), status=Status.RUNNING, attempt_token=token))
-        return run.id, token, found(conn, cases, run.case_id)['payload']
+        case = found(conn, cases, run.case_id)
+        return run.id, token, case['payload'], case['title']
 
 
 def finish(run_id, token, result=None, error=None):
@@ -86,6 +135,8 @@ def finish(run_id, token, result=None, error=None):
         if not count:
             return
         if result is not None:
+            # Evidence rows are append-only per run, so a failed retry never
+            # overwrites the last good version of the batch.
             conn.execute(evidence.insert().values(run_id=run_id, report=result, digest=digest))
         log(conn, 'worker', status.value, run_id)
 
